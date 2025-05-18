@@ -12,7 +12,7 @@ const App = () => {
 
   const handleFileUpload = (event) => {
     const files = Array.from(event.target.files);
-    if (files.length === 0) {
+    if (files.length === 0) { 
       setMessage('Upload canceled. Previous data retained.');
       return;
     }
