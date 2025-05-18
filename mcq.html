@@ -9,8 +9,11 @@
   <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.development.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.20.15/babel.min.js"></script>
 </head>
-<body class="bg-gray-100 min-h-screen flex items-center justify-center">
-  <div id="root"></div>
+<body class="bg-gray-100 min-h-screen flex flex-col items-center justify-center">
+  <div id="root" class="flex-1 w-full"></div>
+  <footer class="text-center text-gray-600 text-sm py-4">
+    Developed by Mithu A Quayium
+  </footer>
 
   <script type="text/babel">
     const { useState } = React;
@@ -207,7 +210,7 @@
 
       return (
         <div className="w-full max-w-7xl mx-auto p-6 bg-white rounded-lg shadow-lg">
-          <h1 className="text-2xl font-bold text-center mb-6">JSON to CSV Converter with Table Preview by CyberCraft</h1>
+          <h1 className="text-2xl font-bold text-center mb-6">JSON to CSV Converter with Table Preview</h1>
 
           <div className="mb-6">
             <label className="block text-gray-700 text-sm font-bold mb-2" htmlFor="jsonFiles">
