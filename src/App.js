@@ -11,6 +11,7 @@ const App = () => {
   const [dragIndex, setDragIndex] = useState(null);
   const [converterMode, setConverterMode] = useState('csv'); // 'csv' or 'sql'
   const [tableName, setTableName] = useState('my_table'); // Default table name for SQL mode
+  const [createTableOnly, setCreateTableOnly] = useState(false); // New state for create table only mode
 
   const handleFileUpload = (event) => {
     const files = Array.from(event.target.files);
@@ -66,7 +67,9 @@ const App = () => {
         isSelected: true,
         isCustom: false,
         defaultValue: '',
-        isUnique: false // New field for SQL unique constraint
+        isUnique: false,
+        columnType: 'varchar', // Default column type
+        isNullable: false // Default to not nullable
       })));
       setMessage(`Successfully loaded ${files.length} file(s) with ${merged.length} items and ${keys.length} unique keys.`);
     });
@@ -98,7 +101,9 @@ const App = () => {
         isSelected: true,
         isCustom: true,
         defaultValue: '',
-        isUnique: false // Initialize isUnique for new custom keys
+        isUnique: false,
+        columnType: 'varchar', // Default column type
+        isNullable: false // Default to not nullable
       }
     ]);
     setMessage('Custom column added. Enter a column name and default value to include it in the output.');
@@ -187,7 +192,7 @@ const App = () => {
   };
 
   const handleConvertToSql = () => {
-    if (mergedJson.length === 0) {
+    if (mergedJson.length === 0 && !createTableOnly) {
       setMessage('No JSON data to convert. Please upload a JSON file.');
       return;
     }
@@ -228,46 +233,87 @@ const App = () => {
         return;
       }
 
-      // Check for duplicate values in unique columns
-      const uniqueColumns = customKeyConfigs
-          .filter(config => config.isSelected && config.isUnique)
-          .map(config => ({ jsonKey: config.jsonKey, columnName: config.columnName || config.jsonKey }));
-      for (const { jsonKey, columnName } of uniqueColumns) {
-        const values = mergedJson.map(item => item[jsonKey] ?? (useCustomKeys ? customKeyConfigs.find(c => c.jsonKey === jsonKey)?.defaultValue : undefined));
-        const valueSet = new Set(values);
-        if (valueSet.size !== values.length) {
-          setMessage(`Error: Duplicate values found in unique column "${columnName}".`);
-          return;
+      // Check for duplicate values in unique columns (only if inserting data)
+      if (!createTableOnly) {
+        const uniqueColumns = customKeyConfigs
+            .filter(config => config.isSelected && config.isUnique)
+            .map(config => ({ jsonKey: config.jsonKey, columnName: config.columnName || config.jsonKey }));
+        for (const { jsonKey, columnName } of uniqueColumns) {
+          const values = mergedJson.map(item => {
+            const value = item[jsonKey] ?? (useCustomKeys ? customKeyConfigs.find(c => c.jsonKey === jsonKey)?.defaultValue : undefined);
+            return typeof value === 'object' && value !== null ? JSON.stringify(value) : value;
+          });
+          const valueSet = new Set(values);
+          if (valueSet.size !== values.length) {
+            setMessage(`Error: Duplicate values found in unique column "${columnName}".`);
+            return;
+          }
         }
       }
 
-      // Generate CREATE TABLE statement with unique constraints
-      const uniqueConstraints = uniqueColumns.map(({ columnName }) => `UNIQUE (${columnName.replace(/[^a-zA-Z0-9_]/g, '_')})`).join(', ');
+      // Generate CREATE TABLE statement
       const columnsWithTypes = sanitizedColumnNames.map((name, index) => {
         const config = customKeyConfigs[index];
-        const isUnique = config?.isUnique ? ' UNIQUE' : '';
-        return `${name} VARCHAR(255)${isUnique}`; // Assuming VARCHAR for simplicity; adjust as needed
-      }).join(', ');
-      const createTableSql = `CREATE TABLE IF NOT EXISTS ${sanitizedTableName} (${columnsWithTypes}${uniqueConstraints ? ', ' + uniqueConstraints : ''});\n`;
-
-      // Generate INSERT statements
-      const escapeSqlValue = (value, defaultValue) => {
-        if (value === null || value === undefined) {
-          return defaultValue !== undefined ? `'${defaultValue.replace(/'/g, "''")}'` : 'NULL';
+        let columnType = config?.columnType || 'varchar';
+        // Ensure VARCHAR has a length; map column types to MySQL-compatible types
+        if (columnType === 'varchar') {
+          columnType = 'VARCHAR(255)';
+        } else if (columnType === 'integer') {
+          columnType = 'INT';
+        } else if (columnType === 'big integer') {
+          columnType = 'BIGINT';
+        } else if (columnType === 'float') {
+          columnType = 'FLOAT';
         }
-        const str = String(value);
-        return `'${str.replace(/'/g, "''")}'`; // Escape single quotes
-      };
+        const isUnique = config?.isUnique ? ' UNIQUE' : '';
+        const isNullable = config?.isNullable ? '' : ' NOT NULL';
+        return `${name} ${columnType}${isNullable}${isUnique}`;
+      }).join(', ');
+      // Remove separate UNIQUE constraints to avoid duplication
+      const createTableSql = `CREATE TABLE IF NOT EXISTS ${sanitizedTableName} (${columnsWithTypes});\n`;
 
-      const insertStatements = mergedJson.map(item => {
-        const values = keysToUse.map((key, index) => {
-          const config = customKeyConfigs.find(c => c.jsonKey === key && c.isSelected);
-          return escapeSqlValue(item[key], useCustomKeys && config ? config.defaultValue : undefined);
-        });
-        return `INSERT INTO ${sanitizedTableName} (${sanitizedColumnNames.join(', ')}) VALUES (${values.join(', ')});`;
-      }).join('\n');
+      let sqlContent = createTableSql;
 
-      const sqlContent = `${createTableSql}${insertStatements}`;
+      // Generate INSERT statements only if not in createTableOnly mode
+      if (!createTableOnly) {
+        const escapeSqlValue = (value, defaultValue, columnType) => {
+          if (value === null || value === undefined) {
+            return defaultValue !== undefined ? `'${defaultValue.replace(/'/g, "''")}'` : (['integer', 'float', 'big integer'].includes(columnType) ? 'NULL' : 'NULL');
+          }
+
+          // Handle objects (e.g., gmap_coordinate might be { lat: 24.7136, lng: 46.6753 })
+          if (typeof value === 'object' && value !== null) {
+            if (columnType === 'varchar') {
+              // For coordinates, convert to "lat,lng" format
+              if ('lat' in value && 'lng' in value) {
+                return `'${value.lat},${value.lng}'`;
+              }
+              // Fallback: JSON string for other objects
+              return `'${JSON.stringify(value).replace(/'/g, "''")}'`;
+            }
+            // For numeric types, return a default value if the object can't be converted
+            if (columnType === 'integer' || columnType === 'big integer') return '0';
+            if (columnType === 'float') return '0.0';
+          }
+
+          const str = String(value);
+          if (columnType === 'integer' || columnType === 'big integer') {
+            return /^[0-9]+$/.test(str) ? str : '0'; // Simple integer validation
+          } else if (columnType === 'float') {
+            return !isNaN(parseFloat(str)) ? parseFloat(str).toString() : '0.0'; // Simple float validation
+          }
+          return `'${str.replace(/'/g, "''")}'`; // Default to string with escaping
+        };
+
+        const insertStatements = mergedJson.map(item => {
+          const values = keysToUse.map((key, index) => {
+            const config = customKeyConfigs.find(c => c.jsonKey === key && c.isSelected);
+            return escapeSqlValue(item[key], useCustomKeys && config ? config.defaultValue : undefined, config?.columnType || 'varchar');
+          });
+          return `INSERT INTO ${sanitizedTableName} (${sanitizedColumnNames.join(', ')}) VALUES (${values.join(', ')});`;
+        }).join('\n');
+        sqlContent += insertStatements;
+      }
 
       const blob = new Blob([sqlContent], { type: 'text/sql;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
@@ -293,6 +339,7 @@ const App = () => {
     setUseCustomKeys(false);
     setConverterMode('csv'); // Reset to CSV mode
     setTableName('my_table'); // Reset table name
+    setCreateTableOnly(false); // Reset create table only mode
     setMessage('All JSON data cleared.');
   };
 
@@ -330,16 +377,31 @@ const App = () => {
             />
           </div>
 
-          <div className="mb-6 flex items-center">
-            <label className="text-gray-700 text-sm font-bold mr-2">
-              Use Custom Keys
-            </label>
-            <input
-                type="checkbox"
-                checked={useCustomKeys}
-                onChange={handleCustomKeysToggle}
-                className="h-5 w-5 text-blue-500 focus:ring-blue-500 border-gray-300 rounded"
-            />
+          <div className="mb-6 flex items-center space-x-4">
+            <div className="flex items-center">
+              <label className="text-gray-700 text-sm font-bold mr-2">
+                Use Custom Keys
+              </label>
+              <input
+                  type="checkbox"
+                  checked={useCustomKeys}
+                  onChange={handleCustomKeysToggle}
+                  className="h-5 w-5 text-blue-500 focus:ring-blue-500 border-gray-300 rounded"
+              />
+            </div>
+            {converterMode === 'sql' && (
+                <div className="flex items-center">
+                  <label className="text-gray-700 text-sm font-bold mr-2">
+                    Generate SQL to create table (No data insert)
+                  </label>
+                  <input
+                      type="checkbox"
+                      checked={createTableOnly}
+                      onChange={(e) => setCreateTableOnly(e.target.checked)}
+                      className="h-5 w-5 text-blue-500 focus:ring-blue-500 border-gray-300 rounded"
+                  />
+                </div>
+            )}
           </div>
 
           {useCustomKeys && customKeyConfigs.length > 0 && (
@@ -366,7 +428,11 @@ const App = () => {
                       </th>
                       <th className="border px-4 py-2 text-left text-sm font-semibold">Default Value</th>
                       {converterMode === 'sql' && (
-                          <th className="border px-4 py-2 text-left text-sm font-semibold">Is Unique</th>
+                          <>
+                            <th className="border px-4 py-2 text-left text-sm font-semibold">Table Column Type</th>
+                            <th className="border px-4 py-2 text-left text-sm font-semibold">Is Null</th>
+                            <th className="border px-4 py-2 text-left text-sm font-semibold">Is Unique</th>
+                          </>
                       )}
                       <th className="border px-4 py-2 text-left text-sm font-semibold">Actions</th>
                     </tr>
@@ -408,14 +474,36 @@ const App = () => {
                             />
                           </td>
                           {converterMode === 'sql' && (
-                              <td className="border px-4 py-2 text-sm text-center">
-                                <input
-                                    type="checkbox"
-                                    checked={config.isUnique || false}
-                                    onChange={(e) => handleKeyConfigChange(index, 'isUnique', e.target.checked)}
-                                    className="h-5 w-5 text-blue-500 focus:ring-blue-500 border-gray-300 rounded"
-                                />
-                              </td>
+                              <>
+                                <td className="border px-4 py-2 text-sm">
+                                  <select
+                                      value={config.columnType || 'varchar'}
+                                      onChange={(e) => handleKeyConfigChange(index, 'columnType', e.target.value)}
+                                      className="w-full border rounded-lg p-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                  >
+                                    <option value="varchar">varchar</option>
+                                    <option value="integer">integer</option>
+                                    <option value="float">float</option>
+                                    <option value="big integer">big integer</option>
+                                  </select>
+                                </td>
+                                <td className="border px-4 py-2 text-sm text-center">
+                                  <input
+                                      type="checkbox"
+                                      checked={config.isNullable || false}
+                                      onChange={(e) => handleKeyConfigChange(index, 'isNullable', e.target.checked)}
+                                      className="h-5 w-5 text-blue-500 focus:ring-blue-500 border-gray-300 rounded"
+                                  />
+                                </td>
+                                <td className="border px-4 py-2 text-sm text-center">
+                                  <input
+                                      type="checkbox"
+                                      checked={config.isUnique || false}
+                                      onChange={(e) => handleKeyConfigChange(index, 'isUnique', e.target.checked)}
+                                      className="h-5 w-5 text-blue-500 focus:ring-blue-500 border-gray-300 rounded"
+                                  />
+                                </td>
+                              </>
                           )}
                           <td className="border px-4 py-2 text-sm text-center flex items-center justify-center space-x-2">
                             <input
@@ -503,11 +591,13 @@ const App = () => {
                       <tr key={index} className="hover:bg-gray-50">
                         {(useCustomKeys ? customKeyConfigs.filter(config => config.isSelected).map(config => config.jsonKey) : dynamicKeys).map((key) => {
                           const config = customKeyConfigs.find(c => c.jsonKey === key && c.isSelected);
+                          const value = item[key];
+                          const displayValue = value !== undefined && value !== null
+                              ? (typeof value === 'object' ? JSON.stringify(value) : String(value))
+                              : (useCustomKeys && config && config.defaultValue ? config.defaultValue : '');
                           return (
                               <td key={key} className="border px-4 py-2 text-sm truncate max-w-xs">
-                                {item[key] !== undefined && item[key] !== null
-                                    ? String(item[key]).substring(0, 50) + (String(item[key]).length > 50 ? '...' : '')
-                                    : (useCustomKeys && config && config.defaultValue ? config.defaultValue : '')}
+                                {displayValue.substring(0, 50) + (displayValue.length > 50 ? '...' : '')}
                               </td>
                           );
                         })}
